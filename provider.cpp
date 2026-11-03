@@ -22,14 +22,14 @@ namespace gufo::models::fish_drama3 {
 
 bool ProbeFishDrama3(std::string_view model_root);
 bool ResolveFishDrama3Artifacts(std::string_view model_root,
-                                std::string* error);
+                                std::string *error);
 
 #if defined(ENGINE_ENABLE_HIP)
 namespace {
 
 constexpr std::uint32_t kModelSampleRate = 44100;
 
-std::vector<float> ToMonoAndResample(const ext::TtsAudioBuffer& audio,
+std::vector<float> ToMonoAndResample(const ext::TtsAudioBuffer &audio,
                                      std::uint32_t target_rate) {
   if (audio.samples.empty()) {
     return {};
@@ -70,13 +70,13 @@ std::vector<float> ToMonoAndResample(const ext::TtsAudioBuffer& audio,
   return resampled;
 }
 
-void AppendU16(std::string* out, std::uint16_t v) {
+void AppendU16(std::string *out, std::uint16_t v) {
   const char bytes[2] = {static_cast<char>(v & 0xFFU),
                          static_cast<char>((v >> 8U) & 0xFFU)};
   out->append(bytes, 2);
 }
 
-void AppendU32(std::string* out, std::uint32_t v) {
+void AppendU32(std::string *out, std::uint32_t v) {
   const char bytes[4] = {static_cast<char>(v & 0xFFU),
                          static_cast<char>((v >> 8U) & 0xFFU),
                          static_cast<char>((v >> 16U) & 0xFFU),
@@ -115,9 +115,9 @@ public:
       std::unique_ptr<hip::SynthesisHipRuntime> runtime)
       : runtime_(std::move(runtime)) {}
 
-  bool Synthesize(const ext::SynthesisRequest& request,
-                  const ext::CancellationCheck& is_cancelled,
-                  ext::SynthesisResult* result, std::string* error) override {
+  bool Synthesize(const ext::SynthesisRequest &request,
+                  const ext::CancellationCheck &is_cancelled,
+                  ext::SynthesisResult *result, std::string *error) override {
     fish_drama3::SynthesisRequest req;
     req.text = request.text;
     req.reference_audio_mono =
@@ -156,15 +156,29 @@ public:
 
   ext::TtsVariant Variant() const override { return ext::TtsVariant::kBase; }
 
+  ext::TtsConditioningCapabilities Conditioning() const override {
+    return {
+        .unconditioned = true,
+        .require_voice = false,
+        .default_voice = "default",
+        .reference_audio = ext::TtsConditioningMode::kOptional,
+        .reference_presets = true,
+        .instructions = ext::TtsConditioningMode::kOptional,
+    };
+  }
+
+  std::uint32_t SampleRate() const override { return kModelSampleRate; }
+
   std::string ModelId() const override { return "fish-drama-3"; }
 
 private:
   std::unique_ptr<hip::SynthesisHipRuntime> runtime_;
 };
 
-std::unique_ptr<ext::TtsRunner> CreateFishDrama3TtsRunner(
-    const std::string& model_root, std::size_t maximum_context_tokens,
-    std::string* error) {
+std::unique_ptr<ext::TtsRunner>
+CreateFishDrama3TtsRunner(const std::string &model_root,
+                          std::size_t maximum_context_tokens,
+                          std::string *error) {
   auto runtime = hip::SynthesisHipRuntime::Create(
       model_root, maximum_context_tokens, error);
   if (!runtime) {
@@ -173,15 +187,14 @@ std::unique_ptr<ext::TtsRunner> CreateFishDrama3TtsRunner(
   return std::make_unique<FishDrama3TtsRunner>(std::move(runtime));
 }
 
-int RunFishDrama3Speak(const ext::SpeakOptions& o) {
+int RunFishDrama3Speak(const ext::SpeakOptions &o) {
   if (o.text.empty()) {
     std::cerr << "Error: Fish Drama-3 speak requires non-empty --text\n";
     return 2;
   }
   std::string error;
   const auto load_begin = std::chrono::steady_clock::now();
-  auto runtime =
-      hip::SynthesisHipRuntime::Create(o.model, o.context, &error);
+  auto runtime = hip::SynthesisHipRuntime::Create(o.model, o.context, &error);
   if (!runtime) {
     std::cerr << "Error loading Fish Drama-3: " << error << "\n";
     return 1;
@@ -239,12 +252,12 @@ int RunFishDrama3Speak(const ext::SpeakOptions& o) {
   return 0;
 }
 
-}  // namespace
+} // namespace
 #endif
 
-}  // namespace gufo::models::fish_drama3
+} // namespace gufo::models::fish_drama3
 
-void fish_drama3_provider_register(gufo::ext::Registry& registry) {
+void fish_drama3_provider_register(gufo::ext::Registry &registry) {
   registry.AddProvider(
       gufo::ext::generated::extension_fish_drama3::kProvider_fish_drama3_tts);
 #if defined(ENGINE_ENABLE_HIP)
