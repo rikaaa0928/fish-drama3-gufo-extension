@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <random>
 #include <span>
 #include <string>
 #include <utility>
@@ -128,7 +129,11 @@ public:
         request.sampling.sample ? request.sampling.temperature : 0.0F;
     req.sampling.top_p = request.sampling.top_p;
     req.sampling.top_k = static_cast<int>(request.sampling.top_k);
-    req.sampling.seed = request.sampling.seed;
+    req.sampling.seed =
+        (request.sampling.seed == 0 && request.sampling.sample)
+            ? (static_cast<std::uint64_t>(std::random_device{}()) << 32U) |
+                  static_cast<std::uint64_t>(std::random_device{}())
+            : request.sampling.seed;
     req.sampling.max_new_frames = request.max_new_tokens;
     req.on_audio = request.on_audio;
 

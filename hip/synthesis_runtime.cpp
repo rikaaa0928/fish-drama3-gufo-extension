@@ -27,7 +27,7 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-void SetError(std::string* error, std::string message) {
+void SetError(std::string *error, std::string message) {
   if (error != nullptr) {
     *error = std::move(message);
   }
@@ -67,9 +67,9 @@ struct SamplerScratch {
   std::vector<double> probabilities;
 };
 
-std::int32_t SampleHostTopKTopP(const std::vector<float>& logits,
+std::int32_t SampleHostTopKTopP(const std::vector<float> &logits,
                                 float temperature, int top_k, float top_p,
-                                std::mt19937& rng, SamplerScratch& scratch) {
+                                std::mt19937 &rng, SamplerScratch &scratch) {
   if (logits.empty()) {
     throw std::runtime_error("Drama 3 sampler received empty logits");
   }
@@ -77,7 +77,7 @@ std::int32_t SampleHostTopKTopP(const std::vector<float>& logits,
     return static_cast<std::int32_t>(std::distance(
         logits.begin(), std::max_element(logits.begin(), logits.end())));
   }
-  auto& order = scratch.order;
+  auto &order = scratch.order;
   order.resize(logits.size());
   std::iota(order.begin(), order.end(), 0);
   const std::size_t count =
@@ -89,7 +89,7 @@ std::int32_t SampleHostTopKTopP(const std::vector<float>& logits,
   const double maximum =
       *std::max_element(logits.begin(), logits.end()) / temperature;
   double total = 0.0;
-  auto& weights = scratch.weights;
+  auto &weights = scratch.weights;
   weights.resize(logits.size());
   for (std::size_t i = 0; i < logits.size(); ++i) {
     weights[i] =
@@ -113,7 +113,7 @@ std::int32_t SampleHostTopKTopP(const std::vector<float>& logits,
     }
     sorted = std::min<std::size_t>(count, sorted * 2U);
   }
-  auto& probabilities = scratch.probabilities;
+  auto &probabilities = scratch.probabilities;
   probabilities.assign(count, 0.0);
   double cumulative = 0.0;
   for (std::size_t r = 0; r < sorted; ++r) {
@@ -128,8 +128,8 @@ std::int32_t SampleHostTopKTopP(const std::vector<float>& logits,
   return order[choice(rng)];
 }
 
-bool SameTakes(const std::vector<Drama3Take>& left,
-               const std::vector<Drama3Take>& right) {
+bool SameTakes(const std::vector<Drama3Take> &left,
+               const std::vector<Drama3Take> &right) {
   if (left.size() != right.size()) {
     return false;
   }
@@ -144,7 +144,7 @@ bool SameTakes(const std::vector<Drama3Take>& left,
   return true;
 }
 
-}  // namespace
+} // namespace
 
 struct SynthesisHipRuntime::Impl {
   ModelConfig config;
@@ -167,7 +167,7 @@ struct SynthesisHipRuntime::Impl {
   Drama3Frame cached_prefix_last_frame{};
   std::vector<float> cached_prefix_last_hidden;
 
-  Impl(const std::string& model_dir, std::size_t max_ctx)
+  Impl(const std::string &model_dir, std::size_t max_ctx)
       : max_context_frames(max_ctx) {
     auto parsed = LoadModelConfigFromPath(model_dir);
     if (!parsed.has_value() || !IsSupportedModelConfig(*parsed)) {
@@ -213,13 +213,14 @@ SynthesisHipRuntime::SynthesisHipRuntime(std::unique_ptr<Impl> impl)
 
 SynthesisHipRuntime::~SynthesisHipRuntime() = default;
 
-std::unique_ptr<SynthesisHipRuntime> SynthesisHipRuntime::Create(
-    const std::string& model_dir, std::size_t max_context_frames,
-    std::string* error) {
+std::unique_ptr<SynthesisHipRuntime>
+SynthesisHipRuntime::Create(const std::string &model_dir,
+                            std::size_t max_context_frames,
+                            std::string *error) {
   try {
     return std::unique_ptr<SynthesisHipRuntime>(new SynthesisHipRuntime(
         std::make_unique<Impl>(model_dir, max_context_frames)));
-  } catch (const std::exception& ex) {
+  } catch (const std::exception &ex) {
     SetError(error, ex.what());
     return nullptr;
   }
@@ -227,8 +228,8 @@ std::unique_ptr<SynthesisHipRuntime> SynthesisHipRuntime::Create(
 
 bool SynthesisHipRuntime::EncodeReference(std::span<const float> mono_samples,
                                           std::uint32_t sample_rate,
-                                          FishDacCodes* out_codes,
-                                          std::string* error) {
+                                          FishDacCodes *out_codes,
+                                          std::string *error) {
   if (out_codes == nullptr || mono_samples.empty()) {
     SetError(error, "Reference audio is empty");
     return false;
@@ -255,10 +256,10 @@ bool SynthesisHipRuntime::EncodeReference(std::span<const float> mono_samples,
   return true;
 }
 
-bool SynthesisHipRuntime::Generate(const SynthesisRequest& request,
-                                   const CancellationCheck& is_cancelled,
-                                   SynthesisResult* result,
-                                   std::string* error) {
+bool SynthesisHipRuntime::Generate(const SynthesisRequest &request,
+                                   const CancellationCheck &is_cancelled,
+                                   SynthesisResult *result,
+                                   std::string *error) {
   if (result == nullptr) {
     SetError(error, "SynthesisResult output pointer is null");
     return false;
@@ -287,7 +288,13 @@ bool SynthesisHipRuntime::Generate(const SynthesisRequest& request,
         impl_->config, *impl_->tokenizer, refs, request.history);
     const auto suffix_frames =
         BuildDrama3PromptSuffix(*impl_->tokenizer, request.text);
-    const std::size_t max_new = request.sampling.max_new_frames;
+    const std::size_t adaptive_cap =
+        std::max<std::size_t>(256U, suffix_frames.size() * 14U);
+    const std::size_t max_new =
+        request.sampling.max_new_frames >= 1024U
+            ? std::min<std::size_t>(request.sampling.max_new_frames,
+                                    adaptive_cap)
+            : request.sampling.max_new_frames;
     if (prefix_frames.size() + suffix_frames.size() + max_new >
         impl_->max_context_frames) {
       SetError(error, "Drama 3 prompt + max_new_frames exceeds context limit");
@@ -399,9 +406,9 @@ bool SynthesisHipRuntime::Generate(const SynthesisRequest& request,
     }
     result->tower_prefill_ms += ElapsedMs(tw_suffix_start);
 
-    std::vector<float> cur_hidden(
-        suffix_hidden.end() - static_cast<std::ptrdiff_t>(dim),
-        suffix_hidden.end());
+    std::vector<float> cur_hidden(suffix_hidden.end() -
+                                      static_cast<std::ptrdiff_t>(dim),
+                                  suffix_hidden.end());
     Drama3Frame cur_frame = suffix_frames.back();
 
     std::mt19937 rng(request.sampling.seed);
@@ -411,13 +418,12 @@ bool SynthesisHipRuntime::Generate(const SynthesisRequest& request,
     output_frames.reserve(max_new);
 
     const bool streaming = static_cast<bool>(request.on_audio);
-    // For non-streaming, decode in 24-frame causal chunks in the background on
-    // Codec's independent HIP stream so Codec execution overlaps with
-    // Backbone+Tower decode!
+    // Decode in 24-frame causal chunks in the background on Codec's
+    // independent HIP stream for both streaming and non-streaming requests so
+    // Codec execution overlaps with Backbone+Tower decode and memory stays
+    // O(1).
     const std::size_t chunk_frames =
-        streaming
-            ? std::max<std::size_t>(1U, request.sampling.stream_chunk_frames)
-            : (max_new > 16U ? max_new - 12U : max_new);
+        std::max<std::size_t>(1U, request.sampling.stream_chunk_frames);
     std::vector<Drama3Frame> pending_stream_frames;
     pending_stream_frames.reserve(chunk_frames);
 
@@ -472,7 +478,7 @@ bool SynthesisHipRuntime::Generate(const SynthesisRequest& request,
       }
       pending_stream_frames.clear();
 
-      FishDacCodecHipRuntime* codec_ptr = impl_->codec.get();
+      FishDacCodecHipRuntime *codec_ptr = impl_->codec.get();
       pending_codec_future = std::async(
           std::launch::async,
           [codec_ptr, codes = std::move(chunk_codes)]() -> AsyncCodecResult {
@@ -506,14 +512,14 @@ bool SynthesisHipRuntime::Generate(const SynthesisRequest& request,
                                   first_token) != recent_tokens.end();
       const std::int32_t selected = repeats ? second : first;
       if (selected == 0) {
-        break;  // EOS reached
+        break; // EOS reached
       }
 
       const std::int32_t semantic_code = selected - 1;
       const std::size_t position = impl_->backbone->valid_steps() - 1U;
       std::array<float, 9> uniforms{};
       if (request.sampling.temperature > 0.0F && request.sampling.top_k > 1) {
-        for (float& u : uniforms) {
+        for (float &u : uniforms) {
           u = static_cast<float>(std::generate_canonical<double, 53>(rng));
         }
       }
@@ -542,10 +548,10 @@ bool SynthesisHipRuntime::Generate(const SynthesisRequest& request,
         break;
       }
 
-      // In streaming mode, launch async Codec decoding right before Backbone
-      // ForwardEmbeddings so Codec chunk decoding and Backbone run concurrently
-      // on separate HIP streams!
-      if (streaming && pending_stream_frames.size() >= chunk_frames) {
+      // Launch async Codec decoding right before Backbone ForwardEmbeddings so
+      // Codec chunk decoding and Backbone run concurrently on separate HIP
+      // streams!
+      if (pending_stream_frames.size() >= chunk_frames) {
         if (!launch_codec_chunk_async()) {
           return false;
         }
@@ -573,15 +579,13 @@ bool SynthesisHipRuntime::Generate(const SynthesisRequest& request,
       return false;
     }
 
-    if (streaming) {
-      if (!pending_stream_frames.empty()) {
-        if (!launch_codec_chunk_async()) {
-          return false;
-        }
-      }
-      if (!wait_pending_codec()) {
+    if (!pending_stream_frames.empty()) {
+      if (!launch_codec_chunk_async()) {
         return false;
       }
+    }
+    if (!wait_pending_codec()) {
+      return false;
     }
 
     result->codes.codebooks = 10;
@@ -594,25 +598,16 @@ bool SynthesisHipRuntime::Generate(const SynthesisRequest& request,
       }
     }
 
-    if (!streaming) {
-      const auto codec_start = Clock::now();
-      if (!impl_->codec->Decode(result->codes, &result->samples, error)) {
-        return false;
-      }
-      result->codec_decode_ms = ElapsedMs(codec_start);
-      result->sample_count = result->samples.size();
-    }
-
     result->total_ms = ElapsedMs(total_start);
     return true;
-  } catch (const std::exception& ex) {
+  } catch (const std::exception &ex) {
     SetError(error, ex.what());
     return false;
   }
 }
 
-const ModelConfig& SynthesisHipRuntime::config() const noexcept {
+const ModelConfig &SynthesisHipRuntime::config() const noexcept {
   return impl_->config;
 }
 
-}  // namespace gufo::models::fish_drama3::hip
+} // namespace gufo::models::fish_drama3::hip

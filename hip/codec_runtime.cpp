@@ -42,7 +42,7 @@ constexpr std::size_t kPostModuleWindow = 128;
 constexpr std::size_t kPreModuleWindow = 128;
 constexpr std::size_t kEncoderTransformerWindow = 512;
 
-void SetError(std::string* error, std::string message) {
+void SetError(std::string *error, std::string message) {
   if (error != nullptr) {
     *error = std::move(message);
   }
@@ -62,21 +62,20 @@ void RequireRocblas(rocblas_status status, std::string_view operation) {
   }
 }
 
-template<typename Element>
-class DeviceBuffer {
+template <typename Element> class DeviceBuffer {
 public:
   DeviceBuffer() = default;
   explicit DeviceBuffer(std::size_t count) { Reset(count); }
   ~DeviceBuffer() { Reset(); }
 
-  DeviceBuffer(const DeviceBuffer&) = delete;
-  DeviceBuffer& operator=(const DeviceBuffer&) = delete;
+  DeviceBuffer(const DeviceBuffer &) = delete;
+  DeviceBuffer &operator=(const DeviceBuffer &) = delete;
 
-  DeviceBuffer(DeviceBuffer&& other) noexcept
+  DeviceBuffer(DeviceBuffer &&other) noexcept
       : data_(std::exchange(other.data_, nullptr)),
         count_(std::exchange(other.count_, 0)) {}
 
-  DeviceBuffer& operator=(DeviceBuffer&& other) noexcept {
+  DeviceBuffer &operator=(DeviceBuffer &&other) noexcept {
     if (this != &other) {
       Reset();
       data_ = std::exchange(other.data_, nullptr);
@@ -101,12 +100,12 @@ public:
       throw std::overflow_error("Fish DAC codec device buffer overflow");
     }
     RequireHip(
-        hipMalloc(reinterpret_cast<void**>(&data_), count * sizeof(Element)),
+        hipMalloc(reinterpret_cast<void **>(&data_), count * sizeof(Element)),
         "hipMalloc Fish DAC codec");
     count_ = count;
   }
 
-  void Upload(const Element* host_data, std::size_t count,
+  void Upload(const Element *host_data, std::size_t count,
               hipStream_t stream = nullptr) {
     Reset(count);
     if (count > 0) {
@@ -122,11 +121,11 @@ public:
     }
   }
 
-  [[nodiscard]] Element* get() const noexcept { return data_; }
+  [[nodiscard]] Element *get() const noexcept { return data_; }
   [[nodiscard]] std::size_t size() const noexcept { return count_; }
 
 private:
-  Element* data_{nullptr};
+  Element *data_{nullptr};
   std::size_t count_{0};
 };
 
@@ -145,10 +144,10 @@ public:
     }
   }
 
-  F32Gemm(const F32Gemm&) = delete;
-  F32Gemm& operator=(const F32Gemm&) = delete;
+  F32Gemm(const F32Gemm &) = delete;
+  F32Gemm &operator=(const F32Gemm &) = delete;
 
-  void Run(const float* weight, const float* input, float* output,
+  void Run(const float *weight, const float *input, float *output,
            std::size_t rows, std::size_t output_columns, std::size_t reduction,
            hipStream_t stream) {
     constexpr std::size_t max_int =
@@ -206,9 +205,9 @@ struct TransformerLayerWeights {
   LinearWeights wo;
   DeviceBuffer<float> attention_scale;
   DeviceBuffer<float> ffn_norm;
-  LinearWeights w1;  // gate
-  LinearWeights w2;  // down
-  LinearWeights w3;  // up
+  LinearWeights w1; // gate
+  LinearWeights w2; // down
+  LinearWeights w3; // up
   DeviceBuffer<float> ffn_scale;
 };
 
@@ -258,12 +257,12 @@ struct EncoderBlockWeights {
 };
 
 struct QuantizerUnitWeights {
-  DeviceBuffer<float> in_proj_weight;       // [8, 1024]
-  DeviceBuffer<float> in_proj_bias;         // [8]
-  DeviceBuffer<float> out_proj_weight;      // [1024, 8]
-  DeviceBuffer<float> out_proj_bias;        // [1024]
-  DeviceBuffer<float> codebook;             // [codebook_size, 8]
-  DeviceBuffer<float> normalized_codebook;  // [codebook_size, 8]
+  DeviceBuffer<float> in_proj_weight;      // [8, 1024]
+  DeviceBuffer<float> in_proj_bias;        // [8]
+  DeviceBuffer<float> out_proj_weight;     // [1024, 8]
+  DeviceBuffer<float> out_proj_bias;       // [1024]
+  DeviceBuffer<float> codebook;            // [codebook_size, 8]
+  DeviceBuffer<float> normalized_codebook; // [codebook_size, 8]
   std::size_t codebook_size{0};
 };
 
@@ -279,14 +278,14 @@ struct AttentionHistory {
 };
 
 struct StreamingState {
-  std::unordered_map<const ConvWeights*, ConvHistory> convolutions;
+  std::unordered_map<const ConvWeights *, ConvHistory> convolutions;
   std::vector<AttentionHistory> post_module_attention;
 
   void Reset() {
-    for (auto& [w, hist] : convolutions) {
+    for (auto &[w, hist] : convolutions) {
       hist.rows = 0;
     }
-    for (auto& attn : post_module_attention) {
+    for (auto &attn : post_module_attention) {
       attn.frames = 0;
     }
   }
@@ -300,18 +299,25 @@ struct Workspace {
   DeviceBuffer<float> history_input;
   DeviceBuffer<float> history_output;
 
-  void EnsureForSamples(std::size_t samples) {
-    if (samples <= max_samples) {
-      return;
-    }
-    // At 1/2 downsample (samples/2), channels can be 768 (decoder block 1
-    // output) or at samples/1, channels = 96. Max intermediate elements is
-    // max(samples * 96, (samples / 2) * 768) = samples * 384.
+  void AllocateExact(std::size_t samples) {
+    // Peak intermediate activation across all Encoder/Decoder stages is
+    // max(samples * 96, (samples / 2) * 192, (samples / 8) * 384, ...)
+    // = samples * 96 floats (plus causal conv history padding).
     const std::size_t scratch_elements =
-        std::max<std::size_t>(samples * 384U, 65536U * 1024U);
+        std::max<std::size_t>((samples + 64U) * 96U, 16384U * 1024U);
     const std::size_t col_elements = scratch_elements * 7U;
+    // Release existing buffers first so peak GTT usage during resize never
+    // doubles and partial failures never leave oversized buffers behind.
+    max_samples = 0;
+    for (auto &buf : scratch) {
+      buf.Reset(0);
+    }
+    columns.Reset(0);
+    history_input.Reset(0);
+    history_output.Reset(0);
+
     codes.Reset(4096U * 10U);
-    for (auto& buf : scratch) {
+    for (auto &buf : scratch) {
       buf.Reset(scratch_elements);
     }
     columns.Reset(col_elements);
@@ -319,11 +325,24 @@ struct Workspace {
     history_output.Reset(scratch_elements);
     max_samples = samples;
   }
+
+  void EnsureForSamples(std::size_t samples) {
+    if (samples <= max_samples) {
+      return;
+    }
+    AllocateExact(samples);
+  }
+
+  void ShrinkToSteadyState(std::size_t steady_samples) {
+    if (max_samples > steady_samples) {
+      AllocateExact(steady_samples);
+    }
+  }
 };
 
-float* FindScratch(Workspace& workspace,
-                   std::initializer_list<const float*> excluded) {
-  for (auto& buffer : workspace.scratch) {
+float *FindScratch(Workspace &workspace,
+                   std::initializer_list<const float *> excluded) {
+  for (auto &buffer : workspace.scratch) {
     if (std::ranges::find(excluded, buffer.get()) == excluded.end()) {
       return buffer.get();
     }
@@ -331,7 +350,7 @@ float* FindScratch(Workspace& workspace,
   throw std::runtime_error("Fish DAC codec scratch buffer exhaustion");
 }
 
-std::vector<float> NormalizeCodebookRows(const float* data, std::size_t rows,
+std::vector<float> NormalizeCodebookRows(const float *data, std::size_t rows,
                                          std::size_t cols) {
   std::vector<float> out(rows * cols, 0.0F);
   for (std::size_t r = 0; r < rows; ++r) {
@@ -349,7 +368,7 @@ std::vector<float> NormalizeCodebookRows(const float* data, std::size_t rows,
   return out;
 }
 
-}  // namespace
+} // namespace
 
 struct FishDacCodecHipRuntime::Impl {
   CodecConfig config;
@@ -357,7 +376,7 @@ struct FishDacCodecHipRuntime::Impl {
   F32Gemm gemm;
   Workspace workspace;
   StreamingState stream_state;
-  StreamingState* active_stream{nullptr};
+  StreamingState *active_stream{nullptr};
 
   // Encoder weights
   ConvWeights encoder_first;
@@ -379,7 +398,7 @@ struct FishDacCodecHipRuntime::Impl {
   DeviceBuffer<float> decoder_final_snake;
   ConvWeights decoder_final;
 
-  Impl(const std::string& model_dir, const CodecConfig& cfg) : config(cfg) {
+  Impl(const std::string &model_dir, const CodecConfig &cfg) : config(cfg) {
     RequireHip(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking),
                "hipStreamCreateWithFlags Fish DAC codec");
     auto store = LoadCodecSafetensorsOrPth(model_dir);
@@ -409,45 +428,45 @@ struct FishDacCodecHipRuntime::Impl {
     }
   }
 
-  const float* RequireF32(const ModelSafetensors& store,
-                          const std::string& name,
+  const float *RequireF32(const ModelSafetensors &store,
+                          const std::string &name,
                           std::initializer_list<std::uint64_t> expected_shape) {
-    const TensorView& t = store.Require(name);
+    const TensorView &t = store.Require(name);
     if (t.dtype != DType::kF32 ||
         !std::ranges::equal(t.shape, expected_shape)) {
       throw std::runtime_error("Unexpected dtype/shape for codec tensor: " +
                                name);
     }
-    return reinterpret_cast<const float*>(t.data);
+    return reinterpret_cast<const float *>(t.data);
   }
 
-  DeviceBuffer<float> LoadVector(const ModelSafetensors& store,
-                                 const std::string& name, std::size_t size) {
-    const TensorView& t = store.Require(name);
+  DeviceBuffer<float> LoadVector(const ModelSafetensors &store,
+                                 const std::string &name, std::size_t size) {
+    const TensorView &t = store.Require(name);
     if (t.dtype != DType::kF32 || t.NumElements() != size) {
       throw std::runtime_error("Unexpected vector tensor shape: " + name);
     }
     DeviceBuffer<float> buf;
-    buf.Upload(reinterpret_cast<const float*>(t.data), size, stream);
+    buf.Upload(reinterpret_cast<const float *>(t.data), size, stream);
     return buf;
   }
 
-  LinearWeights LoadLinear(const ModelSafetensors& store,
-                           const std::string& prefix, std::size_t in_cols,
+  LinearWeights LoadLinear(const ModelSafetensors &store,
+                           const std::string &prefix, std::size_t in_cols,
                            std::size_t out_cols, bool has_bias) {
     LinearWeights res;
     res.input_columns = in_cols;
     res.output_columns = out_cols;
-    const float* w = RequireF32(store, prefix + ".weight", {out_cols, in_cols});
+    const float *w = RequireF32(store, prefix + ".weight", {out_cols, in_cols});
     res.weight.Upload(w, out_cols * in_cols, stream);
     if (has_bias) {
-      const float* b = RequireF32(store, prefix + ".bias", {out_cols});
+      const float *b = RequireF32(store, prefix + ".bias", {out_cols});
       res.bias.Upload(b, out_cols, stream);
     }
     return res;
   }
 
-  ConvWeights LoadConv(const ModelSafetensors& store, const std::string& prefix,
+  ConvWeights LoadConv(const ModelSafetensors &store, const std::string &prefix,
                        std::size_t in_ch, std::size_t out_ch,
                        std::size_t kernel, std::size_t stride = 1,
                        std::size_t dilation = 1, bool depthwise = false) {
@@ -460,9 +479,9 @@ struct FishDacCodecHipRuntime::Impl {
     res.depthwise = depthwise;
     res.transpose = false;
     const std::size_t group_in = depthwise ? 1U : in_ch;
-    const float* w =
+    const float *w =
         RequireF32(store, prefix + ".weight", {out_ch, group_in, kernel});
-    const float* b = RequireF32(store, prefix + ".bias", {out_ch});
+    const float *b = RequireF32(store, prefix + ".bias", {out_ch});
     if (!depthwise && kernel > 1U && group_in > 1U) {
       std::vector<float> reordered(out_ch * kernel * group_in);
       for (std::size_t oc = 0; oc < out_ch; ++oc) {
@@ -481,8 +500,8 @@ struct FishDacCodecHipRuntime::Impl {
     return res;
   }
 
-  ConvWeights LoadTransposeConv(const ModelSafetensors& store,
-                                const std::string& prefix, std::size_t in_ch,
+  ConvWeights LoadTransposeConv(const ModelSafetensors &store,
+                                const std::string &prefix, std::size_t in_ch,
                                 std::size_t out_ch, std::size_t kernel,
                                 std::size_t stride) {
     ConvWeights res;
@@ -493,9 +512,9 @@ struct FishDacCodecHipRuntime::Impl {
     res.dilation = 1;
     res.depthwise = false;
     res.transpose = true;
-    const float* w =
+    const float *w =
         RequireF32(store, prefix + ".weight", {in_ch, out_ch, kernel});
-    const float* b = RequireF32(store, prefix + ".bias", {out_ch});
+    const float *b = RequireF32(store, prefix + ".bias", {out_ch});
     DeviceBuffer<float> raw_w;
     raw_w.Upload(w, in_ch * out_ch * kernel, stream);
     res.weight.Reset(in_ch * out_ch * kernel);
@@ -506,8 +525,8 @@ struct FishDacCodecHipRuntime::Impl {
     return res;
   }
 
-  ResidualUnitWeights LoadResidualUnit(const ModelSafetensors& store,
-                                       const std::string& prefix,
+  ResidualUnitWeights LoadResidualUnit(const ModelSafetensors &store,
+                                       const std::string &prefix,
                                        std::size_t channels,
                                        std::size_t dilation) {
     ResidualUnitWeights unit;
@@ -520,8 +539,8 @@ struct FishDacCodecHipRuntime::Impl {
     return unit;
   }
 
-  ConvNeXtWeights LoadConvNeXt(const ModelSafetensors& store,
-                               const std::string& prefix,
+  ConvNeXtWeights LoadConvNeXt(const ModelSafetensors &store,
+                               const std::string &prefix,
                                std::size_t channels) {
     ConvNeXtWeights cn;
     cn.depthwise = LoadConv(store, prefix + ".dwconv.conv", channels, channels,
@@ -536,8 +555,8 @@ struct FishDacCodecHipRuntime::Impl {
     return cn;
   }
 
-  TransformerWeights LoadTransformer(const ModelSafetensors& store,
-                                     const std::string& prefix,
+  TransformerWeights LoadTransformer(const ModelSafetensors &store,
+                                     const std::string &prefix,
                                      std::size_t num_layers,
                                      std::size_t sliding_window) {
     TransformerWeights tf;
@@ -573,20 +592,20 @@ struct FishDacCodecHipRuntime::Impl {
     return tf;
   }
 
-  QuantizerUnitWeights LoadQuantizerUnit(const ModelSafetensors& store,
-                                         const std::string& prefix,
+  QuantizerUnitWeights LoadQuantizerUnit(const ModelSafetensors &store,
+                                         const std::string &prefix,
                                          std::size_t cb_size) {
     QuantizerUnitWeights q;
     q.codebook_size = cb_size;
-    const float* in_w = RequireF32(store, prefix + ".in_proj.weight",
+    const float *in_w = RequireF32(store, prefix + ".in_proj.weight",
                                    {kCodebookDim, kCodecDim, 1});
-    const float* in_b =
+    const float *in_b =
         RequireF32(store, prefix + ".in_proj.bias", {kCodebookDim});
-    const float* out_w = RequireF32(store, prefix + ".out_proj.weight",
+    const float *out_w = RequireF32(store, prefix + ".out_proj.weight",
                                     {kCodecDim, kCodebookDim, 1});
-    const float* out_b =
+    const float *out_b =
         RequireF32(store, prefix + ".out_proj.bias", {kCodecDim});
-    const float* cb_w =
+    const float *cb_w =
         RequireF32(store, prefix + ".codebook.weight", {cb_size, kCodebookDim});
 
     q.in_proj_weight.Upload(in_w, kCodebookDim * kCodecDim, stream);
@@ -599,7 +618,7 @@ struct FishDacCodecHipRuntime::Impl {
     return q;
   }
 
-  void LoadWeights(const ModelSafetensors& store) {
+  void LoadWeights(const ModelSafetensors &store) {
     // 1. Encoder
     encoder_first = LoadConv(store, "encoder.block.0.conv", 1, 64, 7, 1, 1);
     const std::array<std::size_t, 4> enc_strides{2, 4, 8, 8};
@@ -683,8 +702,8 @@ struct FishDacCodecHipRuntime::Impl {
     decoder_final = LoadConv(store, "decoder.model.6.conv", 96, 1, 7, 1, 1);
   }
 
-  void RunLinear(const LinearWeights& weights, const float* input,
-                 float* output, std::size_t rows) {
+  void RunLinear(const LinearWeights &weights, const float *input,
+                 float *output, std::size_t rows) {
     gemm.Run(weights.weight.get(), input, output, rows, weights.output_columns,
              weights.input_columns, stream);
     if (weights.bias.size() > 0) {
@@ -693,7 +712,7 @@ struct FishDacCodecHipRuntime::Impl {
     }
   }
 
-  void RunConvRaw(const ConvWeights& weights, const float* input, float* output,
+  void RunConvRaw(const ConvWeights &weights, const float *input, float *output,
                   std::size_t input_length, std::size_t output_length) {
     if (weights.depthwise) {
       LaunchCodecCausalDepthwiseConv1d(
@@ -730,7 +749,7 @@ struct FishDacCodecHipRuntime::Impl {
                        weights.output_channels, stream);
   }
 
-  void RunConv(const ConvWeights& weights, const float* input, float* output,
+  void RunConv(const ConvWeights &weights, const float *input, float *output,
                std::size_t input_length, std::size_t output_length) {
     const std::size_t keep =
         weights.transpose
@@ -740,7 +759,7 @@ struct FishDacCodecHipRuntime::Impl {
       RunConvRaw(weights, input, output, input_length, output_length);
       return;
     }
-    auto& history = active_stream->convolutions[&weights];
+    auto &history = active_stream->convolutions[&weights];
     if (history.input.size() < keep * weights.input_channels) {
       history.input.Reset(keep * weights.input_channels);
     }
@@ -749,10 +768,10 @@ struct FishDacCodecHipRuntime::Impl {
     // fish_dac_codec_runtime.cpp).
     const std::size_t previous = keep;
     if (history.rows == 0) {
-      RequireHip(
-          hipMemsetAsync(history.input.get(), 0,
-                         keep * weights.input_channels * sizeof(float), stream),
-          "zero Fish DAC conv history");
+      RequireHip(hipMemsetAsync(history.input.get(), 0,
+                                keep * weights.input_channels * sizeof(float),
+                                stream),
+                 "zero Fish DAC conv history");
       history.rows = keep;
     }
     const std::size_t rows = previous + input_length;
@@ -765,7 +784,7 @@ struct FishDacCodecHipRuntime::Impl {
     if (workspace.history_output.size() < output_elements) {
       workspace.history_output.Reset(output_elements);
     }
-    float* joined = workspace.history_input.get();
+    float *joined = workspace.history_input.get();
     RequireHip(hipMemcpyAsync(joined, history.input.get(),
                               previous * weights.input_channels * sizeof(float),
                               hipMemcpyDeviceToDevice, stream),
@@ -791,14 +810,14 @@ struct FishDacCodecHipRuntime::Impl {
         "copy Fish DAC incremental conv output");
   }
 
-  float* RunConvNeXt(const ConvNeXtWeights& cn, float* input,
+  float *RunConvNeXt(const ConvNeXtWeights &cn, float *input,
                      std::size_t length) {
-    float* depthwise = FindScratch(workspace, {input});
+    float *depthwise = FindScratch(workspace, {input});
     RunConv(cn.depthwise, input, depthwise, length, length);
-    float* normed = FindScratch(workspace, {input, depthwise});
+    float *normed = FindScratch(workspace, {input, depthwise});
     LaunchCodecLayerNorm(depthwise, cn.norm_weight.get(), cn.norm_bias.get(),
                          normed, length, kCodecDim, kConvNextNormEps, stream);
-    float* wide = FindScratch(workspace, {input, depthwise, normed});
+    float *wide = FindScratch(workspace, {input, depthwise, normed});
     RunLinear(cn.pwconv1, normed, wide, length);
     LaunchCodecGelu(wide, length * kCodecDim * 4U, stream);
     RunLinear(cn.pwconv2, wide, depthwise, length);
@@ -807,12 +826,12 @@ struct FishDacCodecHipRuntime::Impl {
     return input;
   }
 
-  float* RunResidualUnit(const ResidualUnitWeights& unit, float* input,
+  float *RunResidualUnit(const ResidualUnitWeights &unit, float *input,
                          std::size_t length, std::size_t channels) {
-    float* branch = FindScratch(workspace, {input});
+    float *branch = FindScratch(workspace, {input});
     LaunchCodecSnake1d(input, unit.snake1_alpha.get(), branch, length, channels,
                        stream);
-    float* work = FindScratch(workspace, {input, branch});
+    float *work = FindScratch(workspace, {input, branch});
     RunConv(unit.conv1, branch, work, length, length);
     LaunchCodecSnake1d(work, unit.snake2_alpha.get(), branch, length, channels,
                        stream);
@@ -821,31 +840,31 @@ struct FishDacCodecHipRuntime::Impl {
     return input;
   }
 
-  float* RunTransformer(const TransformerWeights& tf, float* hidden,
+  float *RunTransformer(const TransformerWeights &tf, float *hidden,
                         std::size_t frames, bool use_stream_cache) {
     if (use_stream_cache && active_stream != nullptr) {
       active_stream->post_module_attention.resize(tf.layers.size());
     }
     for (std::size_t l = 0; l < tf.layers.size(); ++l) {
-      const auto& layer = tf.layers[l];
-      float* normed = FindScratch(workspace, {hidden});
+      const auto &layer = tf.layers[l];
+      float *normed = FindScratch(workspace, {hidden});
       LaunchCodecRmsNorm(hidden, layer.attention_norm.get(), normed, frames,
                          kCodecDim, kCodecNormEps, stream);
-      float* q = FindScratch(workspace, {hidden, normed});
-      float* k = FindScratch(workspace, {hidden, normed, q});
-      float* v = FindScratch(workspace, {hidden, normed, q, k});
+      float *q = FindScratch(workspace, {hidden, normed});
+      float *k = FindScratch(workspace, {hidden, normed, q});
+      float *v = FindScratch(workspace, {hidden, normed, q, k});
       RunLinear(layer.q_proj, normed, q, frames);
       RunLinear(layer.k_proj, normed, k, frames);
       RunLinear(layer.v_proj, normed, v, frames);
 
       std::size_t start_pos = 0;
-      const float* k_ctx = k;
-      const float* v_ctx = v;
+      const float *k_ctx = k;
+      const float *v_ctx = v;
       std::size_t query_offset = 0;
       std::size_t key_frames = frames;
 
       if (use_stream_cache && active_stream != nullptr) {
-        auto& cache = active_stream->post_module_attention[l];
+        auto &cache = active_stream->post_module_attention[l];
         start_pos = cache.frames;
         LaunchCodecInterleavedRope(q, k, frames, kCodecHeads, kCodecHeadDim,
                                    kCodecRopeTheta, stream, start_pos);
@@ -874,7 +893,7 @@ struct FishDacCodecHipRuntime::Impl {
         } else if (keep_prev > 0 && cache.frames > keep_prev) {
           const std::size_t src_off = (cache.frames - keep_prev) * kCodecDim;
           // Slide window left via scratch buffer
-          float* tmp = FindScratch(workspace, {hidden, normed, q, k, v});
+          float *tmp = FindScratch(workspace, {hidden, normed, q, k, v});
           RequireHip(hipMemcpyAsync(tmp, cache.key.get() + src_off,
                                     keep_prev * kCodecDim * sizeof(float),
                                     hipMemcpyDeviceToDevice, stream),
@@ -908,7 +927,7 @@ struct FishDacCodecHipRuntime::Impl {
                                    kCodecRopeTheta, stream, 0);
       }
 
-      float* attn_out = FindScratch(workspace, {hidden, normed, q, k, v});
+      float *attn_out = FindScratch(workspace, {hidden, normed, q, k, v});
       LaunchCodecSlidingCausalAttention(
           q, k_ctx, v_ctx, attn_out, frames, kCodecHeads, kCodecHeadDim,
           tf.sliding_window, stream, query_offset, key_frames);
@@ -918,9 +937,9 @@ struct FishDacCodecHipRuntime::Impl {
 
       LaunchCodecRmsNorm(hidden, layer.ffn_norm.get(), normed, frames,
                          kCodecDim, kCodecNormEps, stream);
-      float* gate = q;
-      float* up = k;
-      float* act = v;
+      float *gate = q;
+      float *up = k;
+      float *act = v;
       RunLinear(layer.w1, normed, gate, frames);
       RunLinear(layer.w3, normed, up, frames);
       LaunchCodecSwiGlu(gate, up, act, frames * kCodecInter, stream);
@@ -928,20 +947,20 @@ struct FishDacCodecHipRuntime::Impl {
       LaunchCodecAddScaledChannels(hidden, normed, layer.ffn_scale.get(),
                                    frames, kCodecDim, stream);
     }
-    float* out = FindScratch(workspace, {hidden});
+    float *out = FindScratch(workspace, {hidden});
     LaunchCodecRmsNorm(hidden, tf.norm.get(), out, frames, kCodecDim,
                        kCodecNormEps, stream);
     return out;
   }
 
-  std::vector<float> RunDecodePass(const FishDacCodes& codes) {
+  std::vector<float> RunDecodePass(const FishDacCodes &codes) {
     const std::size_t frames = static_cast<std::size_t>(codes.frames);
     const std::size_t total_samples = frames * config.frame_length;
     workspace.EnsureForSamples((frames + 16U) *
                                static_cast<std::size_t>(config.frame_length));
     workspace.codes.Upload(codes.codes.data(), codes.codes.size(), stream);
 
-    float* z_q = workspace.scratch[0].get();
+    float *z_q = workspace.scratch[0].get();
     LaunchCodecDequantizeCodebook(workspace.codes.get(),
                                   semantic_quantizer.codebook_size,
                                   semantic_quantizer.codebook.get(),
@@ -949,47 +968,47 @@ struct FishDacCodecHipRuntime::Impl {
                                   semantic_quantizer.out_proj_bias.get(), z_q,
                                   frames, kCodecDim, true, stream);
     for (std::size_t i = 0; i < residual_quantizers.size(); ++i) {
-      const auto& rq = residual_quantizers[i];
+      const auto &rq = residual_quantizers[i];
       LaunchCodecDequantizeCodebook(
           workspace.codes.get() + (i + 1U) * frames, rq.codebook_size,
           rq.codebook.get(), rq.out_proj_weight.get(), rq.out_proj_bias.get(),
           z_q, frames, kCodecDim, false, stream);
     }
 
-    float* hidden =
+    float *hidden =
         RunTransformer(post_module, z_q, frames, active_stream != nullptr);
     std::size_t length = frames;
-    for (const auto& stage : upsample_stages) {
+    for (const auto &stage : upsample_stages) {
       const std::size_t next_len = length * stage.upsample.stride;
-      float* upsampled = FindScratch(workspace, {hidden});
+      float *upsampled = FindScratch(workspace, {hidden});
       RunConv(stage.upsample, hidden, upsampled, length, next_len);
       hidden = RunConvNeXt(stage.convnext, upsampled, next_len);
       length = next_len;
     }
 
-    float* dec_in = FindScratch(workspace, {hidden});
+    float *dec_in = FindScratch(workspace, {hidden});
     RunConv(decoder_first, hidden, dec_in, length, length);
     hidden = dec_in;
     std::size_t channels = 1536;
-    for (const auto& block : decoder_blocks) {
-      float* act = FindScratch(workspace, {hidden});
+    for (const auto &block : decoder_blocks) {
+      float *act = FindScratch(workspace, {hidden});
       LaunchCodecSnake1d(hidden, block.snake_alpha.get(), act, length, channels,
                          stream);
       const std::size_t next_len = length * block.upsample.stride;
-      float* upsampled = FindScratch(workspace, {hidden, act});
+      float *upsampled = FindScratch(workspace, {hidden, act});
       RunConv(block.upsample, act, upsampled, length, next_len);
       channels /= 2U;
       hidden = upsampled;
       length = next_len;
-      for (const auto& res : block.residuals) {
+      for (const auto &res : block.residuals) {
         hidden = RunResidualUnit(res, hidden, length, channels);
       }
     }
 
-    float* final_act = FindScratch(workspace, {hidden});
+    float *final_act = FindScratch(workspace, {hidden});
     LaunchCodecSnake1d(hidden, decoder_final_snake.get(), final_act, length,
                        96U, stream);
-    float* waveform = FindScratch(workspace, {hidden, final_act});
+    float *waveform = FindScratch(workspace, {hidden, final_act});
     RunConv(decoder_final, final_act, waveform, length, length);
     LaunchCodecTanh(waveform, length, stream);
 
@@ -1012,27 +1031,27 @@ struct FishDacCodecHipRuntime::Impl {
     std::vector<float> padded(padded_samples, 0.0F);
     std::copy(mono_samples.begin(), mono_samples.end(), padded.begin());
 
-    float* hidden = workspace.scratch[0].get();
-    RequireHip(
-        hipMemcpyAsync(hidden, padded.data(), padded_samples * sizeof(float),
-                       hipMemcpyHostToDevice, stream),
-        "upload Fish DAC encoder input");
+    float *hidden = workspace.scratch[0].get();
+    RequireHip(hipMemcpyAsync(hidden, padded.data(),
+                              padded_samples * sizeof(float),
+                              hipMemcpyHostToDevice, stream),
+               "upload Fish DAC encoder input");
 
-    float* next = FindScratch(workspace, {hidden});
+    float *next = FindScratch(workspace, {hidden});
     RunConvRaw(encoder_first, hidden, next, padded_samples, padded_samples);
     hidden = next;
     std::size_t length = padded_samples;
     std::size_t channels = 64;
 
-    for (const auto& block : encoder_blocks) {
-      for (const auto& res : block.residuals) {
+    for (const auto &block : encoder_blocks) {
+      for (const auto &res : block.residuals) {
         hidden = RunResidualUnit(res, hidden, length, channels);
       }
-      float* act = FindScratch(workspace, {hidden});
+      float *act = FindScratch(workspace, {hidden});
       LaunchCodecSnake1d(hidden, block.snake_alpha.get(), act, length, channels,
                          stream);
       const std::size_t next_len = length / block.downsample.stride;
-      float* down = FindScratch(workspace, {hidden, act});
+      float *down = FindScratch(workspace, {hidden, act});
       RunConvRaw(block.downsample, act, down, length, next_len);
       hidden = down;
       length = next_len;
@@ -1042,16 +1061,16 @@ struct FishDacCodecHipRuntime::Impl {
       }
     }
 
-    float* final_act = FindScratch(workspace, {hidden});
+    float *final_act = FindScratch(workspace, {hidden});
     LaunchCodecSnake1d(hidden, encoder_final_snake.get(), final_act, length,
                        kCodecDim, stream);
-    float* enc_out = FindScratch(workspace, {hidden, final_act});
+    float *enc_out = FindScratch(workspace, {hidden, final_act});
     RunConvRaw(encoder_final, final_act, enc_out, length, length);
     hidden = enc_out;
 
-    for (const auto& stage : downsample_stages) {
+    for (const auto &stage : downsample_stages) {
       const std::size_t next_len = length / stage.downsample.stride;
-      float* down = FindScratch(workspace, {hidden});
+      float *down = FindScratch(workspace, {hidden});
       RunConvRaw(stage.downsample, hidden, down, length, next_len);
       hidden = RunConvNeXt(stage.convnext, down, next_len);
       length = next_len;
@@ -1074,7 +1093,7 @@ struct FishDacCodecHipRuntime::Impl {
         kCodecDim, semantic_quantizer.codebook_size, stream);
 
     for (std::size_t i = 0; i < residual_quantizers.size(); ++i) {
-      const auto& rq = residual_quantizers[i];
+      const auto &rq = residual_quantizers[i];
       LaunchCodecQuantizeCodebookStep(
           hidden, rq.in_proj_weight.get(), rq.in_proj_bias.get(),
           rq.codebook.get(), rq.normalized_codebook.get(),
@@ -1092,6 +1111,8 @@ struct FishDacCodecHipRuntime::Impl {
                               hipMemcpyDeviceToHost, stream),
                "download Fish DAC encoded codes");
     RequireHip(hipStreamSynchronize(stream), "synchronize Fish DAC encode");
+    workspace.ShrinkToSteadyState(
+        144U * static_cast<std::size_t>(config.frame_length));
     return result;
   }
 };
@@ -1101,20 +1122,20 @@ FishDacCodecHipRuntime::FishDacCodecHipRuntime(std::unique_ptr<Impl> impl)
 
 FishDacCodecHipRuntime::~FishDacCodecHipRuntime() = default;
 
-std::unique_ptr<FishDacCodecHipRuntime> FishDacCodecHipRuntime::Create(
-    const std::string& model_dir, const CodecConfig& config,
-    std::string* error) {
+std::unique_ptr<FishDacCodecHipRuntime>
+FishDacCodecHipRuntime::Create(const std::string &model_dir,
+                               const CodecConfig &config, std::string *error) {
   try {
     return std::unique_ptr<FishDacCodecHipRuntime>(
         new FishDacCodecHipRuntime(std::make_unique<Impl>(model_dir, config)));
-  } catch (const std::exception& ex) {
+  } catch (const std::exception &ex) {
     SetError(error, ex.what());
     return nullptr;
   }
 }
 
 bool FishDacCodecHipRuntime::Encode(std::span<const float> mono_samples,
-                                    FishDacCodes* output, std::string* error) {
+                                    FishDacCodes *output, std::string *error) {
   if (output == nullptr || mono_samples.empty()) {
     SetError(error, "Fish DAC Encode requires non-empty mono samples");
     return false;
@@ -1123,15 +1144,15 @@ bool FishDacCodecHipRuntime::Encode(std::span<const float> mono_samples,
     impl_->active_stream = nullptr;
     *output = impl_->RunEncodePass(mono_samples);
     return true;
-  } catch (const std::exception& ex) {
+  } catch (const std::exception &ex) {
     SetError(error, ex.what());
     return false;
   }
 }
 
-bool FishDacCodecHipRuntime::Decode(const FishDacCodes& codes,
-                                    std::vector<float>* output_samples,
-                                    std::string* error) {
+bool FishDacCodecHipRuntime::Decode(const FishDacCodes &codes,
+                                    std::vector<float> *output_samples,
+                                    std::string *error) {
   if (output_samples == nullptr || codes.frames <= 0 ||
       codes.codebooks !=
           static_cast<std::int64_t>(impl_->config.total_codebooks) ||
@@ -1141,22 +1162,57 @@ bool FishDacCodecHipRuntime::Decode(const FishDacCodes& codes,
     return false;
   }
   try {
-    impl_->active_stream = nullptr;
-    *output_samples = impl_->RunDecodePass(codes);
+    constexpr std::int64_t kMaxBatchFrames = 64;
+    if (codes.frames <= kMaxBatchFrames) {
+      impl_->active_stream = nullptr;
+      *output_samples = impl_->RunDecodePass(codes);
+      return true;
+    }
+    // Decode long sequences in bounded causal chunks of at most 64 frames so
+    // workspace memory stays O(1) regardless of utterance duration.
+    impl_->stream_state.Reset();
+    impl_->active_stream = &impl_->stream_state;
+    struct Guard {
+      Impl *impl;
+      ~Guard() {
+        impl->active_stream = nullptr;
+        impl->stream_state.Reset();
+      }
+    } guard{impl_.get()};
+
+    output_samples->clear();
+    output_samples->reserve(static_cast<std::size_t>(codes.frames) *
+                            impl_->config.frame_length);
+    const std::size_t total_frames = static_cast<std::size_t>(codes.frames);
+    const std::size_t total_cb = static_cast<std::size_t>(codes.codebooks);
+    for (std::size_t start = 0; start < total_frames;
+         start += static_cast<std::size_t>(kMaxBatchFrames)) {
+      const std::size_t len = std::min<std::size_t>(
+          static_cast<std::size_t>(kMaxBatchFrames), total_frames - start);
+      FishDacCodes chunk;
+      chunk.codebooks = codes.codebooks;
+      chunk.frames = static_cast<std::int64_t>(len);
+      chunk.codes.resize(total_cb * len);
+      for (std::size_t cb = 0; cb < total_cb; ++cb) {
+        std::copy_n(codes.codes.data() + cb * total_frames + start, len,
+                    chunk.codes.data() + cb * len);
+      }
+      auto chunk_pcm = impl_->RunDecodePass(chunk);
+      output_samples->insert(output_samples->end(), chunk_pcm.begin(),
+                             chunk_pcm.end());
+    }
     return true;
-  } catch (const std::exception& ex) {
+  } catch (const std::exception &ex) {
     SetError(error, ex.what());
     return false;
   }
 }
 
-void FishDacCodecHipRuntime::ResetStream() {
-  impl_->stream_state.Reset();
-}
+void FishDacCodecHipRuntime::ResetStream() { impl_->stream_state.Reset(); }
 
 bool FishDacCodecHipRuntime::DecodeStreamChunk(
-    const FishDacCodes& chunk_codes, std::vector<float>* output_samples,
-    std::string* error) {
+    const FishDacCodes &chunk_codes, std::vector<float> *output_samples,
+    std::string *error) {
   if (output_samples == nullptr || chunk_codes.frames <= 0 ||
       chunk_codes.codebooks !=
           static_cast<std::int64_t>(impl_->config.total_codebooks) ||
@@ -1169,12 +1225,12 @@ bool FishDacCodecHipRuntime::DecodeStreamChunk(
   try {
     impl_->active_stream = &impl_->stream_state;
     struct Guard {
-      Impl* impl;
+      Impl *impl;
       ~Guard() { impl->active_stream = nullptr; }
     } guard{impl_.get()};
     *output_samples = impl_->RunDecodePass(chunk_codes);
     return true;
-  } catch (const std::exception& ex) {
+  } catch (const std::exception &ex) {
     SetError(error, ex.what());
     return false;
   }
@@ -1188,7 +1244,7 @@ std::uint32_t FishDacCodecHipRuntime::frame_length() const noexcept {
   return impl_->config.frame_length;
 }
 
-}  // namespace gufo::models::fish_drama3::hip
+} // namespace gufo::models::fish_drama3::hip
 
 #else
 
@@ -1200,24 +1256,25 @@ FishDacCodecHipRuntime::FishDacCodecHipRuntime(std::unique_ptr<Impl> impl)
     : impl_(std::move(impl)) {}
 FishDacCodecHipRuntime::~FishDacCodecHipRuntime() = default;
 
-std::unique_ptr<FishDacCodecHipRuntime> FishDacCodecHipRuntime::Create(
-    const std::string&, const CodecConfig&, std::string* error) {
+std::unique_ptr<FishDacCodecHipRuntime>
+FishDacCodecHipRuntime::Create(const std::string &, const CodecConfig &,
+                               std::string *error) {
   if (error != nullptr) {
     *error = "Fish DAC codec runtime requires a HIP-enabled build";
   }
   return nullptr;
 }
 
-bool FishDacCodecHipRuntime::Encode(std::span<const float>, FishDacCodes*,
-                                    std::string* error) {
+bool FishDacCodecHipRuntime::Encode(std::span<const float>, FishDacCodes *,
+                                    std::string *error) {
   if (error != nullptr) {
     *error = "Fish DAC codec runtime requires a HIP-enabled build";
   }
   return false;
 }
 
-bool FishDacCodecHipRuntime::Decode(const FishDacCodes&, std::vector<float>*,
-                                    std::string* error) {
+bool FishDacCodecHipRuntime::Decode(const FishDacCodes &, std::vector<float> *,
+                                    std::string *error) {
   if (error != nullptr) {
     *error = "Fish DAC codec runtime requires a HIP-enabled build";
   }
@@ -1226,9 +1283,9 @@ bool FishDacCodecHipRuntime::Decode(const FishDacCodes&, std::vector<float>*,
 
 void FishDacCodecHipRuntime::ResetStream() {}
 
-bool FishDacCodecHipRuntime::DecodeStreamChunk(const FishDacCodes&,
-                                               std::vector<float>*,
-                                               std::string* error) {
+bool FishDacCodecHipRuntime::DecodeStreamChunk(const FishDacCodes &,
+                                               std::vector<float> *,
+                                               std::string *error) {
   if (error != nullptr) {
     *error = "Fish DAC codec runtime requires a HIP-enabled build";
   }
@@ -1242,6 +1299,6 @@ std::uint32_t FishDacCodecHipRuntime::frame_length() const noexcept {
   return 2048;
 }
 
-}  // namespace gufo::models::fish_drama3::hip
+} // namespace gufo::models::fish_drama3::hip
 
 #endif
