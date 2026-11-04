@@ -275,6 +275,7 @@ struct AttentionHistory {
   DeviceBuffer<float> key;
   DeviceBuffer<float> value;
   std::size_t frames{0};
+  std::size_t position{0};
 };
 
 struct StreamingState {
@@ -287,6 +288,7 @@ struct StreamingState {
     }
     for (auto &attn : post_module_attention) {
       attn.frames = 0;
+      attn.position = 0;
     }
   }
 };
@@ -865,7 +867,7 @@ struct FishDacCodecHipRuntime::Impl {
 
       if (use_stream_cache && active_stream != nullptr) {
         auto &cache = active_stream->post_module_attention[l];
-        start_pos = cache.frames;
+        start_pos = cache.position;
         LaunchCodecInterleavedRope(q, k, frames, kCodecHeads, kCodecHeadDim,
                                    kCodecRopeTheta, stream, start_pos);
         const std::size_t keep_prev =
@@ -919,7 +921,8 @@ struct FishDacCodecHipRuntime::Impl {
                                   frames * kCodecDim * sizeof(float),
                                   hipMemcpyDeviceToDevice, stream),
                    "append codec V");
-        cache.frames += frames;
+        cache.frames = key_frames;
+        cache.position += frames;
         k_ctx = cache.key.get();
         v_ctx = cache.value.get();
       } else {
