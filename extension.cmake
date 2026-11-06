@@ -8,6 +8,7 @@ gufo_extension_target(
     loader.cpp
     tokenizer.cpp
     prompt.cpp
+    host_memory.cpp
     extension.cpp
   LINK_LIBRARIES
     gufo_ext_runtime
