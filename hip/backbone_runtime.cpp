@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "hip/backbone_ops.hpp"
+#include "host_memory.hpp"
 
 namespace gufo::models::fish_drama3::hip {
 namespace {
@@ -555,6 +556,15 @@ struct BackboneHipRuntime::Impl {
       LoadExpertBankFp8(store, lp, "down_proj", lw.num_experts, dim,
                         cfg.intermediate_size, &lw.experts_down_fp8,
                         &lw.experts_down_scale);
+      // The layer's mapped weights are on the device now. Without dropping
+      // them, Windows keeps every touched page of the ~40 GB checkpoint
+      // resident and runs a 32 GB host out of memory mid-load. Other
+      // platforms reclaim such pages themselves; skip the extra sync there.
+#if defined(_WIN32)
+      RequireHip(hipStreamSynchronize(stream),
+                 "hipStreamSynchronize Drama 3 backbone layer");
+      TrimResidentHostPages();
+#endif
     }
 
     final_norm = LoadGemmaNorm(store, "model.language_model.norm.weight", dim);
